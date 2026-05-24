@@ -1,48 +1,42 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
-
-	"github.com/h2non/filetype"
+	"project-audi-e/api-gateway/db"
+	"project-audi-e/api-gateway/handlers"
 )
 
-func uploadHandler(w http.ResponseWriter, r *http.Request) {
-	// limit file size to 10MB
-	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
-
-	file, _, err := r.FormFile("audio")
-	if err != nil {
-		http.Error(w, "large file or invalid file", http.StatusBadRequest)
-		return
-	}
-	defer file.Close()
-
-	// check	 file type
-	head := make([]byte, 261)
-	file.Read(head)
-	file.Seek(0, 0) // Reset file pointer
-
-	if !filetype.IsAudio(head) {
-		http.Error(w, "not a valid audio file!", http.StatusUnsupportedMediaType)
-		return
-	}
-
-	// 3. send to AI Service (Python)
-	// Resty \\ http.Post)
-	fmt.Println("save file, sending to AI Service...")
-	
-	// return dummy response for now
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	fmt.Fprintf(w, `{"message": "analysis complete", "file_status": "Clean"}`)
-}
-
 func main() {
-	http.HandleFunc("/upload", uploadHandler)
-	fmt.Println("Go Backend running on port 8080...")
-	http.ListenAndServe(":8080", nil)
+	// Initialize SQLite Database
+	dbPath := "../data/audi-e.db"
+	if err := db.InitDB(dbPath); err != nil {
+		fmt.Printf("Error initializing database: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Register Handlers
+	http.HandleFunc("/register", handlers.RegisterHandler)
+	http.HandleFunc("/login", handlers.LoginHandler)
+	http.HandleFunc("/upload", handlers.UploadHandler)
+
+	// Display current mode
+	if handlers.IsPentestMode() {
+		fmt.Println("==================================================")
+		fmt.Println("[SECURITY WARNING] PENTEST MODE IS ACTIVE!")
+		fmt.Println("Vulnerabilities (SQLi, File Upload) are enabled.")
+		fmt.Println("==================================================")
+	} else {
+		fmt.Println("==================================================")
+		fmt.Println("[SECURITY INFO] SECURE MODE IS ACTIVE.")
+		fmt.Println("Security checks are enabled.")
+		fmt.Println("==================================================")
+	}
+
+	port := ":8080"
+	fmt.Printf("Go Backend running on port %s...\n", port)
+	if err := http.ListenAndServe(port, nil); err != nil {
+		fmt.Printf("Error starting server: %v\n", err)
+	}
 }
