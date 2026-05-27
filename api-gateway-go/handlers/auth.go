@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"project-audi-e/api-gateway/db"
+	"sync"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -22,8 +23,21 @@ type AuthResponse struct {
 	User    string `json:"user,omitempty"`
 }
 
+var (
+	pentestModeMutex   sync.RWMutex
+	pentestModeEnabled bool = os.Getenv("PENTEST_MODE") == "true"
+)
+
 func IsPentestMode() bool {
-	return os.Getenv("PENTEST_MODE") == "true"
+	pentestModeMutex.RLock()
+	defer pentestModeMutex.RUnlock()
+	return pentestModeEnabled
+}
+
+func SetPentestMode(enabled bool) {
+	pentestModeMutex.Lock()
+	pentestModeEnabled = enabled
+	pentestModeMutex.Unlock()
 }
 
 // RegisterHandler handles user registration
@@ -157,4 +171,45 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(AuthResponse{Status: "success", Message: "Logged in successfully", User: dbUsername})
+}
+
+// ModeHandler gets or sets the dynamic pentest mode
+func ModeHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]bool{"pentest_mode": IsPentestMode()})
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		var req struct {
+			PentestMode bool `json:"pentest_mode"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "Invalid request body"})
+			return
+		}
+
+		SetPentestMode(req.PentestMode)
+		fmt.Printf("[SYSTEM] Dynamic Pentest Mode set to: %v\n", req.PentestMode)
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":       "success",
+			"pentest_mode": IsPentestMode(),
+		})
+		return
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }

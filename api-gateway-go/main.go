@@ -20,6 +20,7 @@ func main() {
 	http.HandleFunc("/register", handlers.RegisterHandler)
 	http.HandleFunc("/login", handlers.LoginHandler)
 	http.HandleFunc("/upload", handlers.UploadHandler)
+	http.HandleFunc("/mode", handlers.ModeHandler)
 
 	// Display current mode
 	if handlers.IsPentestMode() {

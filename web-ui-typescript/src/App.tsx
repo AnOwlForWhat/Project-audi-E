@@ -79,6 +79,8 @@ const MOCK_SONGS: Song[] = [
   }
 ];
 
+const API_HOST = 'http://localhost:8080';
+
 export default function App() {
   // Mode configuration state
   const [isPentestMode, setIsPentestMode] = useState<boolean>(false);
@@ -130,6 +132,21 @@ export default function App() {
     }
   ]);
 
+  // Dynamic sync with Go Backend on load
+  useEffect(() => {
+    fetch(`${API_HOST}/mode`)
+      .then(res => res.json())
+      .then(data => {
+        if (typeof data.pentest_mode === 'boolean') {
+          setIsPentestMode(data.pentest_mode);
+          addLog(`SYSTEM SYNC: Loaded security mode from Go backend: ${data.pentest_mode ? 'VULNERABLE' : 'SECURE'}`, 'success');
+        }
+      })
+      .catch(() => {
+        addLog(`SYSTEM WARNING: Go backend unreachable. Running in offline simulation mode.`, 'warn');
+      });
+  }, []);
+
   // Audio Visualizer Canvas reference
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationRef = useRef<number | null>(null);
@@ -148,20 +165,43 @@ export default function App() {
   // Toggle Pentest Mode
   const handleModeToggle = () => {
     const nextMode = !isPentestMode;
-    setIsPentestMode(nextMode);
     
-    // Clear state associated with exploit
-    if (!nextMode) {
-      setWebshellActive(false);
-      setWebshellName('');
-      setLoggedInUser(null);
-      setAuthError(null);
-    }
-
-    addLog(
-      `SYSTEM SWITCH: Toggled mode to ${nextMode ? 'VULNERABLE (PENTEST ACTIVE)' : 'SECURE (FILTERING ACTIVE)'}`,
-      nextMode ? 'warn' : 'info'
-    );
+    // Attempt to post to dynamic Go backend
+    fetch(`${API_HOST}/mode`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ pentest_mode: nextMode }),
+    })
+      .then(res => res.json())
+      .then(data => {
+        setIsPentestMode(data.pentest_mode);
+        if (!data.pentest_mode) {
+          setWebshellActive(false);
+          setWebshellName('');
+          setLoggedInUser(null);
+          setAuthError(null);
+        }
+        addLog(
+          `SYSTEM SWITCH: Go backend dynamic mode changed to: ${data.pentest_mode ? 'VULNERABLE (PENTEST ACTIVE)' : 'SECURE (FILTERING ACTIVE)'}`,
+          data.pentest_mode ? 'warn' : 'info'
+        );
+      })
+      .catch(() => {
+        // Fallback to local simulation if offline
+        setIsPentestMode(nextMode);
+        if (!nextMode) {
+          setWebshellActive(false);
+          setWebshellName('');
+          setLoggedInUser(null);
+          setAuthError(null);
+        }
+        addLog(
+          `SYSTEM WARNING: Go backend unreachable. Simulated offline mode changed to: ${nextMode ? 'VULNERABLE' : 'SECURE'}`,
+          nextMode ? 'warn' : 'info'
+        );
+      });
   };
 
   // Audio Play/Pause simulation
@@ -273,104 +313,155 @@ export default function App() {
   };
 
   // Process file upload under secure/vulnerable logic
+  // Process file upload under secure/vulnerable logic
   const processFile = (file: File) => {
     setUploadError(null);
     setUploadProgress(0);
     setUploadedFile(null);
     
-    addLog(`FILE_UPLOAD: Received file upload request for "${file.name}" (${(file.size / 1024).toFixed(1)} KB)`, 'info');
+    addLog(`FILE_UPLOAD: Uploading file "${file.name}" to Go Gateway...`, 'info');
 
-    // Simulate progress upload
-    let progress = 0;
-    const interval = setInterval(() => {
-      progress += 25;
-      setUploadProgress(progress);
-      if (progress >= 100) {
-        clearInterval(interval);
+    // Create FormData and append file with key 'audio'
+    const formData = new FormData();
+    formData.append('audio', file);
+
+    // Perform actual API upload to Go
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+
+    fetch(`${API_HOST}/upload`, {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal,
+    })
+      .then(async (res) => {
+        clearTimeout(timeoutId);
+        const data = await res.json();
         
-        // Run validations
+        if (!res.ok) {
+          throw new Error(data.message || `Server returned status ${res.status}`);
+        }
+        return data;
+      })
+      .then((data) => {
+        setUploadProgress(null);
+        setUploadedFile({
+          name: data.file_name,
+          size: `${(file.size / 1024).toFixed(1)} KB`,
+          type: file.type || 'unknown/binary'
+        });
+
+        addLog(`FILE_UPLOAD: Success. File saved as "${data.file_name}"`, 'success');
+
         const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
-        
-        if (isPentestMode) {
-          // VULNERABLE MODE: No checks, allows any file!
-          setUploadProgress(null);
-          setUploadedFile({
-            name: file.name,
-            size: `${(file.size / 1024).toFixed(1)} KB`,
-            type: file.type || 'unknown/binary'
-          });
-          
-          addLog(`[PENTEST_MODE: ACTIVE] Unsafe upload. Concatenating path. Saving as: "../data/uploads/${file.name}"`, 'warn');
-          addLog(`FILE_UPLOAD: Success. File uploaded to server successfully.`, 'success');
 
-          // Check if uploaded file is a script (web shell simulation)
-          if (ext === '.php' || ext === '.py' || ext === '.sh' || ext === '.jsp') {
-            setWebshellActive(true);
-            setWebshellName(file.name);
-            addLog(`EXPLOIT TRAP: Web shell script detected at destination! URL endpoint available: http://localhost:8080/data/uploads/${file.name}`, 'warn');
-            addLog(`Web Shell command execution window unlocked in console panel below.`, 'success');
-          } else {
-            // It's a standard audio, append it to mock play list
-            const newSongId = `uploaded-${Date.now()}`;
-            const newSong: Song = {
-              id: newSongId,
-              title: file.name.replace(/\.[^/.]+$/, ""),
-              artist: 'Uploaded Track',
-              tempo: Math.floor(Math.random() * 40) + 90,
-              pitch: 'E Minor',
-              chords: ['Em', 'C', 'G', 'D'],
-              notes: [
-                { time: '0:00', note: 'E3', duration: '1/2' },
-                { time: '0:04', note: 'G3', duration: '1/2' }
-              ]
-            };
-            setSongs(prev => [...prev, newSong]);
-            setSelectedSongId(newSongId);
-          }
+        // If in vulnerable mode and a shell script was uploaded
+        if (isPentestMode && (ext === '.php' || ext === '.py' || ext === '.sh' || ext === '.jsp')) {
+          setWebshellActive(true);
+          setWebshellName(file.name);
+          addLog(`EXPLOIT TRAP: Web shell script detected at destination! URL endpoint available: http://localhost:8080/data/uploads/${file.name}`, 'warn');
+          addLog(`Web Shell command execution window unlocked in console panel below.`, 'success');
         } else {
-          // SECURE MODE: Extension and mime check
-          setUploadProgress(null);
-          if (ext !== '.mp3' && ext !== '.wav') {
-            const errText = `Security Error: Extension "${ext}" is blocked. Only .mp3 and .wav are permitted!`;
-            setUploadError(errText);
-            addLog(`[SECURE_MODE: ACTIVE] File blocked: ${errText}`, 'err');
-            return;
+          // If analysis results are returned from backend
+          let tempo = Math.floor(Math.random() * 40) + 90;
+          let pitch = 'C Minor';
+          let notesList = [{ time: '0:00', note: 'C3', duration: '1/1' }];
+
+          if (data.analysis) {
+            tempo = Math.round(data.analysis.tempo);
+            pitch = `${data.analysis.detected_frequency.toFixed(1)} Hz (Librosa)`;
+            if (data.analysis.notes && data.analysis.notes.length > 0) {
+              notesList = data.analysis.notes.map((n: string, i: number) => ({
+                time: `0:${(i * 2).toString().padStart(2, '0')}`,
+                note: n,
+                duration: '1/2'
+              }));
+            }
+            if (data.analysis.warning) {
+              addLog(`ANALYSIS WARNING: ${data.analysis.warning}`, 'warn');
+            } else {
+              addLog(`ANALYSIS SUCCESS: Real audio parameters processed by Python AI!`, 'success');
+            }
           }
 
-          // Simulate magic bytes check fail if not an audio mime (mocking backend validation)
-          if (file.type && !file.type.startsWith('audio/')) {
-            const errText = `Security Error: File type spoofing detected. Magic bytes do not match expected audio headers!`;
-            setUploadError(errText);
-            addLog(`[SECURE_MODE: ACTIVE] File blocked: ${errText}`, 'err');
-            return;
-          }
-
-          // Secure rename to UUID
-          const uuidName = `f3b49e20-80d1-4db5-${Math.floor(Math.random()*9000+1000).toString(16)}${ext}`;
-          setUploadedFile({
-            name: uuidName,
-            size: `${(file.size / 1024).toFixed(1)} KB`,
-            type: file.type
-          });
-          
-          addLog(`[SECURE_MODE: ACTIVE] Safe rename: Renaming original file "${file.name}" to UUID "${uuidName}" to prevent Path Traversal/Webshell execution.`, 'success');
-          
-          // Append to song database
-          const newSongId = `secure-${Date.now()}`;
+          const newSongId = `uploaded-${Date.now()}`;
           const newSong: Song = {
             id: newSongId,
             title: file.name.replace(/\.[^/.]+$/, ""),
-            artist: 'Secure Upload',
-            tempo: 100,
-            pitch: 'C Minor',
-            chords: ['Cm', 'Ab', 'Fm', 'G'],
-            notes: [{ time: '0:00', note: 'C3', duration: '1/1' }]
+            artist: data.analysis && data.analysis.status !== 'fallback_offline' ? 'Real Audio Analysis' : 'Offline Upload',
+            tempo: tempo,
+            pitch: pitch,
+            chords: ['Am', 'F', 'C', 'G'],
+            notes: notesList
           };
+
           setSongs(prev => [...prev, newSong]);
           setSelectedSongId(newSongId);
         }
-      }
-    }, 200);
+      })
+      .catch((err) => {
+        clearTimeout(timeoutId);
+        setUploadProgress(null);
+        
+        // If offline fallback simulation is preferred
+        addLog(`SYSTEM WARNING: Go backend upload failed: ${err.message}. Running offline simulation.`, 'warn');
+        
+        // Run simulation
+        setTimeout(() => {
+          const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+          
+          if (isPentestMode) {
+            setUploadedFile({
+              name: file.name,
+              size: `${(file.size / 1024).toFixed(1)} KB`,
+              type: file.type || 'unknown/binary'
+            });
+            addLog(`[OFFLINE SIMULATION: VULNERABLE] Saved file: "${file.name}"`, 'warn');
+            
+            if (ext === '.php' || ext === '.py' || ext === '.sh' || ext === '.jsp') {
+              setWebshellActive(true);
+              setWebshellName(file.name);
+              addLog(`Web Shell command execution window unlocked in console panel below.`, 'success');
+            } else {
+              const newSongId = `uploaded-${Date.now()}`;
+              setSongs(prev => [...prev, {
+                id: newSongId,
+                title: file.name.replace(/\.[^/.]+$/, ""),
+                artist: 'Offline Sim Upload',
+                tempo: 120,
+                pitch: 'C Minor',
+                chords: ['Cm', 'Ab', 'Fm', 'G'],
+                notes: [{ time: '0:00', note: 'C3', duration: '1/1' }]
+              }]);
+              setSelectedSongId(newSongId);
+            }
+          } else {
+            if (ext !== '.mp3' && ext !== '.wav') {
+              setUploadError(`Security Error: Extension "${ext}" is blocked. Only .mp3 and .wav are permitted!`);
+              return;
+            }
+            const uuidName = `f3b49e20-80d1-4db5-${Math.floor(Math.random()*9000+1000).toString(16)}${ext}`;
+            setUploadedFile({
+              name: uuidName,
+              size: `${(file.size / 1024).toFixed(1)} KB`,
+              type: file.type
+            });
+            addLog(`[OFFLINE SIMULATION: SECURE] Safe rename to ${uuidName}`, 'success');
+            
+            const newSongId = `uploaded-${Date.now()}`;
+            setSongs(prev => [...prev, {
+              id: newSongId,
+              title: file.name.replace(/\.[^/.]+$/, ""),
+              artist: 'Offline Sim Upload',
+              tempo: 100,
+              pitch: 'C Minor',
+              chords: ['Cm', 'Ab', 'Fm', 'G'],
+              notes: [{ time: '0:00', note: 'C3', duration: '1/1' }]
+            }]);
+            setSelectedSongId(newSongId);
+          }
+        }, 500);
+      });
   };
 
   // SQL Injection Submission
@@ -379,48 +470,68 @@ export default function App() {
     setAuthError(null);
     setLoggedInUser(null);
 
-    addLog(`AUTH: Login attempt with username: "${usernameInput}"`, 'info');
+    addLog(`AUTH: Sending credentials for "${usernameInput}" to Go backend...`, 'info');
 
-    if (isPentestMode) {
-      // VULNERABLE MODE: SQLi Injection direct query matching
-      const query = `SELECT username, password FROM users WHERE username = '${usernameInput}' AND password = '${passwordInput}'`;
-      addLog(`[PENTEST_MODE: ACTIVE] Concatenating query: ${query}`, 'warn');
-
-      // Check if username has SQL injection payload to bypass
-      const isBypassed = 
-        usernameInput.includes("' OR") || 
-        usernameInput.includes("'or") || 
-        usernameInput.includes("'--") ||
-        usernameInput.includes("' OR '1'='1") ||
-        usernameInput.includes("' OR 1=1") ||
-        usernameInput.includes('" OR ""="');
-
-      if (isBypassed) {
-        setLoggedInUser('admin');
-        addLog(`[SQL INJECTION DETECTED] Authentication bypassed successfully! Returned user row: "admin"`, 'success');
-      } else {
-        // Simple mock normal matching
-        if (usernameInput === 'admin' && passwordInput === 'admin') {
-          setLoggedInUser('admin');
-          addLog(`AUTH: Successful login as: "admin"`, 'success');
-        } else {
-          setAuthError('Invalid credentials');
-          addLog(`AUTH: Failed authentication.`, 'err');
+    // Make real login request to Go Gateway
+    fetch(`${API_HOST}/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        username: usernameInput,
+        password: passwordInput,
+      }),
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.message || `Status ${res.status}`);
         }
-      }
-    } else {
-      // SECURE MODE: Parameterized queries simulation
-      addLog(`[SECURE_MODE: ACTIVE] Parameterized query: SELECT username, password FROM users WHERE username = ? (Param: "${usernameInput}")`, 'info');
-      
-      // Standard matching, escaping special characters
-      if (usernameInput === 'admin' && passwordInput === 'admin123') {
-        setLoggedInUser('admin');
-        addLog(`AUTH: Successful login as: "admin"`, 'success');
-      } else {
-        setAuthError('Invalid credentials');
-        addLog(`AUTH: Failed authentication. Invalid username/password.`, 'err');
-      }
-    }
+        return data;
+      })
+      .then((data) => {
+        setLoggedInUser(data.user || 'admin');
+        addLog(`AUTH SUCCESS: Logged in successfully. Backend user response: "${data.user}"`, 'success');
+        if (data.message && data.message.includes("SQL Injection")) {
+          addLog(`[SECURITY EXPLOIT SUCCESS] SQL Injection Bypass Triggered! Message: "${data.message}"`, 'success');
+        }
+      })
+      .catch((err) => {
+        // Fallback to local simulation if offline
+        addLog(`SYSTEM WARNING: Go auth endpoint failed (${err.message}). Using local simulation fallback.`, 'warn');
+        
+        if (isPentestMode) {
+          const isBypassed = 
+            usernameInput.includes("' OR") || 
+            usernameInput.includes("'or") || 
+            usernameInput.includes("'--") ||
+            usernameInput.includes("' OR '1'='1") ||
+            usernameInput.includes("' OR 1=1") ||
+            usernameInput.includes('" OR ""="');
+
+          if (isBypassed) {
+            setLoggedInUser('admin');
+            addLog(`[SQL INJECTION SIMULATION SUCCESS] Authentication bypassed!`, 'success');
+          } else {
+            if (usernameInput === 'admin' && passwordInput === 'admin') {
+              setLoggedInUser('admin');
+              addLog(`AUTH SIM: Logged in as "admin"`, 'success');
+            } else {
+              setAuthError('Invalid credentials');
+              addLog(`AUTH SIM: Failed.`, 'err');
+            }
+          }
+        } else {
+          if (usernameInput === 'admin' && passwordInput === 'admin123') {
+            setLoggedInUser('admin');
+            addLog(`AUTH SIM: Logged in as "admin"`, 'success');
+          } else {
+            setAuthError('Invalid credentials');
+            addLog(`AUTH SIM: Failed.`, 'err');
+          }
+        }
+      });
   };
 
   // Terminal Exec Simulation (Command Injection)
